@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import {
   User,
+  getRedirectResult,
   onAuthStateChanged,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
 } from 'firebase/auth';
 import {
@@ -84,6 +86,21 @@ function MainApp() {
   const [syncLabel, setSyncLabel] = useState('Local Session');
   const [authError, setAuthError] = useState<string | null>(null);
 
+  // Complete pending redirect sign-in if returning from Google OAuth (top-level hosts)
+  useEffect(() => {
+    let active = true;
+    void getRedirectResult(auth).catch((err) => {
+      if (!active) return;
+      const code = typeof err === 'object' && err !== null && 'code' in err ? String((err as { code: unknown }).code) : '';
+      if (code && code !== 'auth/no-auth-event') {
+        setAuthError(formatAuthErrorMessage(err));
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   // Listen for Firebase Auth state
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (nextUser) => {
@@ -98,6 +115,7 @@ function MainApp() {
         setIsDiaryLocked(true);
         setSyncLabel('Local Session');
       } else {
+        setAuthError(null);
         setSyncLabel('Cloud Archive · Synced');
       }
     });
@@ -237,12 +255,60 @@ function MainApp() {
     };
   }, [isDiaryLocked, unlockedPassword, profile?.spellLockSalt, rawEntries]);
 
+  const isInIframe = typeof window !== 'undefined' && window.self !== window.top;
+
+  const formatAuthErrorMessage = (err: unknown): string => {
+    const code =
+      typeof err === 'object' && err !== null && 'code' in err
+        ? String((err as { code: unknown }).code)
+        : '';
+    const hostname = typeof window !== 'undefined' ? window.location.hostname : 'this domain';
+
+    if (code === 'auth/unauthorized-domain') {
+      return `Domain "${hostname}" is not authorized for Google Sign-In in Firebase project "arcane-spells". Add "${hostname}" in Firebase Console -> Authentication -> Settings -> Authorized domains.`;
+    }
+    if (code === 'auth/popup-blocked') {
+      return isInIframe
+        ? 'The Google Sign-In popup was blocked by your browser. Allow popups for this site or open the app directly in a new tab.'
+        : 'The Google Sign-In popup was blocked. Allow popups or use Redirect Sign-In below.';
+    }
+    if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+      return 'Google Sign-In popup was closed before completing. Please try again.';
+    }
+    if (code === 'auth/operation-not-allowed') {
+      return 'Google Sign-In is disabled in Firebase Console. Enable Google under Authentication -> Sign-in method.';
+    }
+    return err instanceof Error ? err.message : 'Unable to sign in with Google.';
+  };
+
   const handleSignIn = async () => {
     setAuthError(null);
     try {
       await signInWithPopup(auth, googleProvider);
     } catch (err) {
-      setAuthError(err instanceof Error ? err.message : 'Unable to sign in.');
+      const code =
+        typeof err === 'object' && err !== null && 'code' in err
+          ? String((err as { code: unknown }).code)
+          : '';
+      if (code === 'auth/popup-blocked' && !isInIframe) {
+        try {
+          await signInWithRedirect(auth, googleProvider);
+          return;
+        } catch (redirectErr) {
+          setAuthError(formatAuthErrorMessage(redirectErr));
+          return;
+        }
+      }
+      setAuthError(formatAuthErrorMessage(err));
+    }
+  };
+
+  const handleRedirectSignIn = async () => {
+    setAuthError(null);
+    try {
+      await signInWithRedirect(auth, googleProvider);
+    } catch (err) {
+      setAuthError(formatAuthErrorMessage(err));
     }
   };
 
@@ -532,8 +598,26 @@ function MainApp() {
 
       <main className="relative z-10 flex-1 max-w-7xl w-full mx-auto px-4 sm:px-8 py-8">
         {authError && (
-          <div className="mb-6 rounded-lg bg-[#8c1d24] text-[#f9f3e6] px-4 py-3 text-sm">
-            {authError}
+          <div className="mb-6 rounded-lg bg-[#8c1d24] border border-[#c99a3b]/50 text-[#f9f3e6] px-4 py-3 text-sm flex flex-wrap items-center justify-between gap-3">
+            <span className="flex-1 min-w-[220px] leading-relaxed">{authError}</span>
+            <div className="flex items-center gap-2 shrink-0">
+              {!isInIframe && (
+                <button
+                  type="button"
+                  onClick={() => void handleRedirectSignIn()}
+                  className="px-3 py-1.5 rounded-md bg-[#c99a3b] text-[#1a110b] text-xs font-semibold hover:bg-[#e6bd62] transition-colors whitespace-nowrap"
+                >
+                  Try Redirect Sign-In
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setAuthError(null)}
+                className="px-2.5 py-1.5 rounded-md border border-[#f9f3e6]/30 text-xs font-medium hover:bg-black/20 whitespace-nowrap"
+              >
+                Dismiss
+              </button>
+            </div>
           </div>
         )}
 
