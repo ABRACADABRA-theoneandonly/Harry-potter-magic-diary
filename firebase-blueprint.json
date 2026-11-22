@@ -1,0 +1,252 @@
+{
+  "entities": {
+    "WizardProfile": {
+      "title": "WizardProfile",
+      "description": "Player-created wizarding character profile, custom diary lock spell hash, and duel statistics.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the character owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Wizard or witch character name.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "age": {
+          "type": "integer",
+          "description": "Character age in years."
+        },
+        "house": {
+          "type": "string",
+          "description": "Wizarding house affiliation.",
+          "enum": ["Gryffindor", "Slytherin", "Ravenclaw", "Hufflepuff"]
+        },
+        "school": {
+          "type": "string",
+          "description": "Wizarding school attended.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "bloodStatus": {
+          "type": "string",
+          "description": "Character blood heritage.",
+          "enum": ["Pure-blood", "Half-blood", "Muggle-born", "Squib", "Magical Heritage"]
+        },
+        "wandCore": {
+          "type": "string",
+          "description": "Core material inside the character's wand.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "wandWood": {
+          "type": "string",
+          "description": "Wood type of the character's wand.",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "spellLockHash": {
+          "type": "string",
+          "description": "Salted SHA-256 hex digest of the custom diary lock spell password.",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "spellLockSalt": {
+          "type": "string",
+          "description": "Hex salt used for hashing and deriving the diary key.",
+          "minLength": 0,
+          "maxLength": 64
+        },
+        "spellLockHint": {
+          "type": "string",
+          "description": "Optional reminder hint for the custom lock spell.",
+          "minLength": 0,
+          "maxLength": 120
+        },
+        "duelWins": {
+          "type": "integer",
+          "description": "Total completed duels won."
+        },
+        "duelLosses": {
+          "type": "integer",
+          "description": "Total completed duels lost."
+        },
+        "umbridgeDefeatedCount": {
+          "type": "integer",
+          "description": "Number of times Professor Umbridge has been defeated."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the wizard profile was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the wizard profile was last updated."
+        }
+      },
+      "required": [
+        "uid",
+        "name",
+        "age",
+        "house",
+        "school",
+        "bloodStatus",
+        "wandCore",
+        "wandWood",
+        "spellLockHash",
+        "spellLockSalt",
+        "spellLockHint",
+        "duelWins",
+        "duelLosses",
+        "umbridgeDefeatedCount",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "DiaryEntry": {
+      "title": "DiaryEntry",
+      "description": "A secret manuscript entry stored in the wizard's enchanted diary.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the diary owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "description": "Entry title or chapter heading.",
+          "minLength": 1,
+          "maxLength": 140
+        },
+        "content": {
+          "type": "string",
+          "description": "AES-GCM encrypted ciphertext or plain manuscript text.",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "isEncrypted": {
+          "type": "boolean",
+          "description": "Whether content is encrypted with the custom diary spell password."
+        },
+        "iv": {
+          "type": "string",
+          "description": "Base64 initialization vector for AES-GCM decryption.",
+          "minLength": 0,
+          "maxLength": 64
+        },
+        "fontFamily": {
+          "type": "string",
+          "description": "Selected manuscript typeface for this entry.",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "inputMode": {
+          "type": "string",
+          "description": "Whether the entry was typed, mouse-handwritten, or mixed.",
+          "enum": ["typed", "handwritten", "mixed"]
+        },
+        "moodTag": {
+          "type": "string",
+          "description": "Short thematic mood or category label.",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of entry creation."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last entry edit."
+        }
+      },
+      "required": [
+        "ownerId",
+        "title",
+        "content",
+        "isEncrypted",
+        "iv",
+        "fontFamily",
+        "inputMode",
+        "moodTag",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ScrollQuery": {
+      "title": "ScrollQuery",
+      "description": "Archived question-and-answer scroll from the Arcane Scroll Oracle.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the scroll owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "question": {
+          "type": "string",
+          "description": "The question inscribed on the scroll.",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "answer": {
+          "type": "string",
+          "description": "The oracle's response from diary secrets or web lookup.",
+          "minLength": 1,
+          "maxLength": 8000
+        },
+        "sourceType": {
+          "type": "string",
+          "description": "Origin of the answer.",
+          "enum": ["diary", "web", "hybrid"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the scroll was inscribed."
+        }
+      },
+      "required": [
+        "ownerId",
+        "question",
+        "answer",
+        "sourceType",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/wizards/{userId}": {
+      "schema": {
+        "$ref": "#/entities/WizardProfile"
+      },
+      "description": "Primary wizard character profile, custom spell lock hash, and duel records owned by userId."
+    },
+    "/wizards/{userId}/entries/{entryId}": {
+      "schema": {
+        "$ref": "#/entities/DiaryEntry"
+      },
+      "description": "Cloud-synced secret diary entries belonging to userId."
+    },
+    "/wizards/{userId}/scrollQueries/{queryId}": {
+      "schema": {
+        "$ref": "#/entities/ScrollQuery"
+      },
+      "description": "Saved Arcane Scroll Q&A records belonging to userId."
+    }
+  }
+}

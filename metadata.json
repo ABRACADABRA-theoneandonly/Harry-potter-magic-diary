@@ -1,0 +1,6 @@
+{
+  "name": "Grimoire & Quill",
+  "description": "An enchanted wizarding manuscript diary with spell-password encryption, mouse handwriting recognition, arcane knowledge scrolls, and real-time spell duels.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
