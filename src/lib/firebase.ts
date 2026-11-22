@@ -1,10 +1,19 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 import { doc, getDocFromServer, getFirestore } from 'firebase/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
+
+const firebaseConfig = {
+  apiKey: "AIzaSyCS7zTOoUFwKrMZDWK7lWgLmDD5vAVVHEE",
+  authDomain: "arcane-spells.firebaseapp.com",
+  projectId: "arcane-spells",
+  storageBucket: "arcane-spells.firebasestorage.app",
+  messagingSenderId: "582547890223",
+  appId: "1:582547890223:web:7accce95b6cac8fbe526da",
+  measurementId: "G-LBBS9D1VQR",
+};
 
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+export const db = getFirestore(app);
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 

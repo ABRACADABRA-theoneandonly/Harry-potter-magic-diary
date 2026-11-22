@@ -45,6 +45,7 @@ export const ArcaneScrolls: React.FC<ArcaneScrollsProps> = ({
   const [question, setQuestion] = useState('');
   const [isSearching, setIsSearching] = useState(false);
   const [latestResult, setLatestResult] = useState<{
+    id: string;
     question: string;
     answer: string;
     sourceType: 'diary' | 'web' | 'hybrid';
@@ -57,6 +58,7 @@ export const ArcaneScrolls: React.FC<ArcaneScrollsProps> = ({
     const trimmed = promptText.trim().slice(0, FIELD_LIMITS.QUESTION_MAX);
     if (!trimmed) return;
 
+    const queryId = `${Date.now()}-${Math.random()}`;
     setErrorMsg(null);
     setIsSearching(true);
     playSpellSound('light', isMuted);
@@ -71,7 +73,7 @@ export const ArcaneScrolls: React.FC<ArcaneScrollsProps> = ({
             moodTag: e.moodTag,
           }));
 
-      const response = await fetch('/api/scroll-oracle', {
+      const response = await fetch('/api/scroll-oracle-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -83,41 +85,101 @@ export const ArcaneScrolls: React.FC<ArcaneScrollsProps> = ({
         }),
       });
 
-      let data: {
-        answer?: string;
-        sourceType?: 'diary' | 'web' | 'hybrid';
-        sources?: Array<{ title: string; uri: string }>;
-        error?: string;
-      } = {};
-
-      try {
-        data = (await response.json()) as typeof data;
-      } catch {
-        data = {};
-      }
-
       if (!response.ok) {
-        throw new Error(data.error || 'The scroll failed to reveal an answer.');
+        let errData: { error?: string } = {};
+        try {
+          errData = (await response.json()) as { error?: string };
+        } catch {
+          errData = {};
+        }
+        throw new Error(errData.error || 'The scroll failed to reveal an answer.');
       }
 
-      const answer = data.answer || 'No response appeared on the parchment.';
-      const sourceType = data.sourceType || 'web';
-      const sources = data.sources || [];
+      if (!response.body) {
+        throw new Error('Streaming is unavailable on this browser.');
+      }
 
-      setLatestResult({
-        question: trimmed,
-        answer,
-        sourceType,
-        sources,
-      });
       setQuestion('');
-
-      await onSaveScrollQuery({
+      setLatestResult({
+        id: queryId,
         question: trimmed,
-        answer: answer.slice(0, 8000),
-        sourceType,
+        answer: '',
+        sourceType: 'web',
+        sources: [],
       });
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let finalAnswer = '';
+      let finalSourceType: 'diary' | 'web' | 'hybrid' = 'web';
+      let finalSources: Array<{ title: string; uri: string }> = [];
+
+      const handleSseBlock = (block: string) => {
+        const lines = block.split('\n');
+        let eventName = 'message';
+        let dataLine = '';
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            eventName = line.slice(7).trim();
+          } else if (line.startsWith('data: ')) {
+            dataLine += line.slice(6);
+          }
+        }
+        if (!dataLine) return;
+
+        const payload = JSON.parse(dataLine) as {
+          text?: string;
+          answer?: string;
+          sourceType?: 'diary' | 'web' | 'hybrid';
+          sources?: Array<{ title: string; uri: string }>;
+          error?: string;
+        };
+
+        if (eventName === 'chunk' && payload.text) {
+          finalAnswer += payload.text;
+          setLatestResult((prev) =>
+            prev && prev.id === queryId ? { ...prev, answer: prev.answer + payload.text } : prev
+          );
+        } else if (eventName === 'done') {
+          finalAnswer = payload.answer || finalAnswer || 'No response appeared on the parchment.';
+          finalSourceType = payload.sourceType || 'web';
+          finalSources = payload.sources || [];
+          setLatestResult({
+            id: queryId,
+            question: trimmed,
+            answer: finalAnswer,
+            sourceType: finalSourceType,
+            sources: finalSources,
+          });
+        } else if (eventName === 'error') {
+          throw new Error(payload.error || 'The scroll failed to reveal an answer.');
+        }
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() || '';
+        for (const part of parts) {
+          if (part.trim()) handleSseBlock(part);
+        }
+      }
+      if (buffer.trim()) {
+        handleSseBlock(buffer);
+      }
+
+      if (finalAnswer) {
+        void onSaveScrollQuery({
+          question: trimmed,
+          answer: finalAnswer.slice(0, 8000),
+          sourceType: finalSourceType,
+        });
+      }
     } catch (err) {
+      setLatestResult((prev) => (prev && prev.id === queryId && !prev.answer ? null : prev));
       setErrorMsg(err instanceof Error ? err.message : 'Unable to consult the Arcane Scroll.');
     } finally {
       setIsSearching(false);
@@ -250,11 +312,11 @@ export const ArcaneScrolls: React.FC<ArcaneScrollsProps> = ({
       <AnimatePresence mode="wait">
         {latestResult && (
           <motion.section
-            key={latestResult.question + latestResult.answer.slice(0, 20)}
+            key={latestResult.id}
             initial={{ opacity: 0, scaleY: 0.86, y: -8 }}
             animate={{ opacity: 1, scaleY: 1, y: 0 }}
             exit={{ opacity: 0 }}
-            transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
+            transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
             style={{ originY: 0 }}
           >
             <div className="scroll-rod -mx-1 relative z-10" aria-hidden="true" />
@@ -274,7 +336,7 @@ export const ArcaneScrolls: React.FC<ArcaneScrollsProps> = ({
               </div>
 
               <p className="mt-4 text-base text-[#23170f] leading-relaxed whitespace-pre-wrap">
-                {latestResult.answer}
+                {latestResult.answer || 'Consulting Google & Arcane Archives...'}
               </p>
 
               {latestResult.sources.length > 0 && (

@@ -111,30 +111,44 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const attemptCooldownUntil = new Map<string, number>();
+
 async function runWithModelFallback<T>(
   attempts: Array<{ label: string; run: () => Promise<T> }>
 ): Promise<T> {
+  const now = Date.now();
+  const eligible = attempts.filter(
+    (attempt, idx) => idx === attempts.length - 1 || (attemptCooldownUntil.get(attempt.label) ?? 0) <= now
+  );
   let lastError: unknown;
 
-  for (let i = 0; i < attempts.length; i++) {
-    const attempt = attempts[i];
+  for (let i = 0; i < eligible.length; i++) {
+    const attempt = eligible[i];
     try {
-      return await attempt.run();
+      const result = await attempt.run();
+      attemptCooldownUntil.delete(attempt.label);
+      return result;
     } catch (err) {
       lastError = err;
       const parsed = parseGeminiError(err, 'Gemini request failed.');
 
       // Short backoff retry only on transient 503/500 spikes; 429 quota failures advance immediately to fallback
       if (parsed.status === 503 || parsed.status === 500) {
-        await sleep(450);
+        await sleep(300);
         try {
-          return await attempt.run();
+          const retryResult = await attempt.run();
+          attemptCooldownUntil.delete(attempt.label);
+          return retryResult;
         } catch (retryErr) {
           lastError = retryErr;
         }
       }
 
       const retryParsed = parseGeminiError(lastError, 'Gemini request failed.');
+      if (retryParsed.isQuotaOrRateLimit) {
+        attemptCooldownUntil.set(attempt.label, Date.now() + 45_000);
+      }
+
       // Only fall back to secondary models/configs on quota/rate-limit, model-not-found, or transient 5xx
       const canFallback =
         retryParsed.isQuotaOrRateLimit ||
@@ -149,6 +163,103 @@ async function runWithModelFallback<T>(
   }
 
   throw lastError;
+}
+
+interface ScrollOracleInput {
+  question?: string;
+  diaryEntries?: Array<{ title: string; content: string; createdAtLabel: string; moodTag: string }>;
+  diaryLocked?: boolean;
+  wizardName?: string;
+  wizardHouse?: string;
+}
+
+function buildScrollOraclePrompt(body: ScrollOracleInput) {
+  const {
+    question,
+    diaryEntries = [],
+    diaryLocked = false,
+    wizardName = 'Student',
+    wizardHouse = 'Hogwarts',
+  } = body;
+
+  const trimmedQuestion = typeof question === 'string' ? question.trim() : '';
+  const safeEntries = Array.isArray(diaryEntries)
+    ? diaryEntries.slice(0, 40).map((e) => ({
+        title: String(e.title || '').slice(0, 140),
+        content: String(e.content || '').slice(0, 2000),
+        createdAtLabel: String(e.createdAtLabel || '').slice(0, 60),
+        moodTag: String(e.moodTag || '').slice(0, 40),
+      }))
+    : [];
+
+  const diaryContext =
+    safeEntries.length > 0
+      ? safeEntries
+          .map(
+            (entry, idx) =>
+              `[Entry ${idx + 1}] Title: "${entry.title}" | Date: ${entry.createdAtLabel} | Mood: ${entry.moodTag}\n${entry.content}`
+          )
+          .join('\n\n')
+      : 'No unlocked diary entries are currently readable.';
+
+  const systemInstruction = `You are the Keeper of the Arcane Scrolls assisting ${wizardName} of ${wizardHouse}.
+You have two sources of truth:
+1. The user's personal Secret Diary entries provided below.
+2. Live world knowledge, facts, math, and web data via Google Search grounding.
+
+Rules:
+- First check if the user's question asks about something recorded in their personal diary (memories, secrets, dates, notes they wrote).
+  - If diaryLocked is true (${diaryLocked}) and the question asks about their diary/journal/secrets, gently tell them their diary is currently sealed with a protective password charm and ask them to unlock the diary first to read private entries.
+  - If the answer is in the unlocked diary entries, answer directly and cite the exact entry title and date.
+- Otherwise, answer directly and concisely using Google Search grounding (e.g., for "2 plus 2", answer "4" right away; for world facts, provide a crisp, accurate answer).
+- Keep responses brief, direct, and scholarly—start answering immediately without preamble.
+- Do not fabricate diary contents that are not in the provided entries.`;
+
+  const contents = `Diary Status: ${diaryLocked ? 'SEALED (locked)' : 'UNSEALED (unlocked)'}\n\nUnlocked Diary Entries:\n${diaryContext}\n\nScroll Question: ${trimmedQuestion}`;
+
+  return { trimmedQuestion, safeEntries, diaryLocked, systemInstruction, contents };
+}
+
+function extractGroundingSources(
+  chunks: Array<{ web?: { uri?: string; title?: string } }> | undefined
+): Array<{ title: string; uri: string }> {
+  const sources: Array<{ title: string; uri: string }> = [];
+  const seen = new Set<string>();
+  for (const chunk of chunks ?? []) {
+    const uri = chunk?.web?.uri;
+    const title = chunk?.web?.title;
+    if (uri && !seen.has(uri)) {
+      seen.add(uri);
+      sources.push({ title: title || uri, uri });
+    }
+  }
+  return sources.slice(0, 5);
+}
+
+function resolveScrollSourceType(
+  question: string,
+  answer: string,
+  diaryLocked: boolean,
+  safeEntries: Array<{ title: string }>,
+  sourcesCount: number
+): 'diary' | 'web' | 'hybrid' {
+  const mentionsEntry =
+    !diaryLocked &&
+    safeEntries.some(
+      (entry) => entry.title && answer.toLowerCase().includes(entry.title.toLowerCase())
+    );
+
+  if (mentionsEntry && sourcesCount > 0) return 'hybrid';
+  if (
+    mentionsEntry ||
+    (!diaryLocked &&
+      safeEntries.length > 0 &&
+      sourcesCount === 0 &&
+      /diary|entry|journal|secret|wrote|note/i.test(question))
+  ) {
+    return 'diary';
+  }
+  return 'web';
 }
 
 async function startServer() {
@@ -195,11 +306,21 @@ async function startServer() {
       const response = await runWithModelFallback([
         {
           label: 'gemini-4-hydrogen (ink)',
-          run: () => ai.models.generateContent({ model: 'gemini-4-hydrogen', contents }),
+          run: () =>
+            ai.models.generateContent({
+              model: 'gemini-4-hydrogen',
+              contents,
+              config: { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } },
+            }),
         },
         {
           label: 'gemini-3.1-flash-lite (ink)',
-          run: () => ai.models.generateContent({ model: 'gemini-3.1-flash-lite', contents }),
+          run: () =>
+            ai.models.generateContent({
+              model: 'gemini-3.1-flash-lite',
+              contents,
+              config: { thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL } },
+            }),
         },
       ]);
 
@@ -213,65 +334,120 @@ async function startServer() {
     }
   });
 
-  // Arcane Scroll Oracle: answers from unlocked diary secrets OR looks up web/general knowledge via Google Search grounding
-  app.post('/api/scroll-oracle', async (req, res) => {
+  // Streaming Arcane Scroll Oracle via SSE + Google Search Grounding for near-instant first token
+  app.post('/api/scroll-oracle-stream', async (req, res) => {
+    const body = req.body as ScrollOracleInput;
+    const { trimmedQuestion, safeEntries, diaryLocked, systemInstruction, contents } =
+      buildScrollOraclePrompt(body);
+
+    if (!trimmedQuestion) {
+      res.status(400).json({ error: 'Please write a question on the scroll.' });
+      return;
+    }
+    if (trimmedQuestion.length > 500) {
+      res.status(400).json({ error: 'Question must be 500 characters or fewer.' });
+      return;
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    const sendEvent = (event: string, data: unknown) => {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+
     try {
-      const {
-        question,
-        diaryEntries = [],
-        diaryLocked = false,
-        wizardName = 'Student',
-        wizardHouse = 'Hogwarts',
-      } = req.body as {
-        question?: string;
-        diaryEntries?: Array<{ title: string; content: string; createdAtLabel: string; moodTag: string }>;
-        diaryLocked?: boolean;
-        wizardName?: string;
-        wizardHouse?: string;
+      const ai = getGeminiClient();
+
+      const streamAndConsume = async (
+        model: string,
+        thinkingLevel: ThinkingLevel,
+        useSearch: boolean
+      ) => {
+        const stream = await ai.models.generateContentStream({
+          model,
+          contents,
+          config: {
+            systemInstruction,
+            thinkingConfig: { thinkingLevel },
+            ...(useSearch ? { tools: [{ googleSearch: {} }] } : {}),
+          },
+        });
+
+        let fullText = '';
+        let latestChunks: Array<{ web?: { uri?: string; title?: string } }> | undefined;
+
+        for await (const chunk of stream) {
+          const piece = chunk.text ?? '';
+          if (piece) {
+            fullText += piece;
+            sendEvent('chunk', { text: piece });
+          }
+          const candidateChunks = chunk.candidates?.[0]?.groundingMetadata?.groundingChunks;
+          if (candidateChunks && candidateChunks.length > 0) {
+            latestChunks = candidateChunks;
+          }
+        }
+
+        return { fullText, latestChunks };
       };
 
-      if (!question || typeof question !== 'string' || question.trim().length === 0) {
+      const { fullText, latestChunks } = await runWithModelFallback([
+        {
+          label: 'gemini-4-hydrogen + search (stream)',
+          run: () => streamAndConsume('gemini-4-hydrogen', ThinkingLevel.LOW, true),
+        },
+        {
+          label: 'gemini-3.1-flash-lite + search (stream)',
+          run: () => streamAndConsume('gemini-3.1-flash-lite', ThinkingLevel.MINIMAL, true),
+        },
+        {
+          label: 'gemini-4-hydrogen (stream direct)',
+          run: () => streamAndConsume('gemini-4-hydrogen', ThinkingLevel.LOW, false),
+        },
+        {
+          label: 'gemini-3.1-flash-lite (stream direct)',
+          run: () => streamAndConsume('gemini-3.1-flash-lite', ThinkingLevel.MINIMAL, false),
+        },
+      ]);
+
+      const answer = (fullText || 'The ink faded before an answer formed. Please try again.').trim();
+      const sources = extractGroundingSources(latestChunks);
+      const sourceType = resolveScrollSourceType(
+        trimmedQuestion,
+        answer,
+        diaryLocked,
+        safeEntries,
+        sources.length
+      );
+
+      sendEvent('done', { answer, sourceType, sources });
+      res.end();
+    } catch (error) {
+      console.error('Scroll oracle stream error:', error);
+      const parsed = parseGeminiError(error, 'Failed to consult the Arcane Scroll.');
+      sendEvent('error', { error: parsed.userMessage, code: parsed.status });
+      res.end();
+    }
+  });
+
+  // Arcane Scroll Oracle (JSON fallback/REST endpoint)
+  app.post('/api/scroll-oracle', async (req, res) => {
+    try {
+      const body = req.body as ScrollOracleInput;
+      const { trimmedQuestion, safeEntries, diaryLocked, systemInstruction, contents } =
+        buildScrollOraclePrompt(body);
+
+      if (!trimmedQuestion) {
         res.status(400).json({ error: 'Please write a question on the scroll.' });
         return;
       }
-      if (question.length > 500) {
+      if (trimmedQuestion.length > 500) {
         res.status(400).json({ error: 'Question must be 500 characters or fewer.' });
         return;
       }
-
-      const safeEntries = Array.isArray(diaryEntries)
-        ? diaryEntries.slice(0, 40).map((e) => ({
-            title: String(e.title || '').slice(0, 140),
-            content: String(e.content || '').slice(0, 2000),
-            createdAtLabel: String(e.createdAtLabel || '').slice(0, 60),
-            moodTag: String(e.moodTag || '').slice(0, 40),
-          }))
-        : [];
-
-      const diaryContext =
-        safeEntries.length > 0
-          ? safeEntries
-              .map(
-                (entry, idx) =>
-                  `[Entry ${idx + 1}] Title: "${entry.title}" | Date: ${entry.createdAtLabel} | Mood: ${entry.moodTag}\n${entry.content}`
-              )
-              .join('\n\n')
-          : 'No unlocked diary entries are currently readable.';
-
-      const systemInstruction = `You are the Keeper of the Arcane Scrolls assisting ${wizardName} of ${wizardHouse}.
-You have two sources of truth:
-1. The user's personal Secret Diary entries provided below.
-2. General knowledge, mathematics, wizarding lore, and live world information via Google Search grounding.
-
-Rules:
-- First check if the user's question is asking about something recorded in their personal diary (memories, secrets, dates, notes they wrote).
-  - If diaryLocked is true (${diaryLocked}) and the question asks about their diary/journal/secrets, gently tell them their diary is currently sealed with a protective password charm and ask them to unlock the diary first to read private entries.
-  - If the answer is in the unlocked diary entries, answer directly and cite the exact entry title and date.
-- If the question is NOT in their diary (for example arithmetic like "2 plus 2", factual trivia, current events, science, definitions, or Harry Potter lore), compute or look it up accurately using Google Search grounding and answer clearly and concisely (e.g. for "2 plus 2", answer "4" plainly right away).
-- Keep your tone refined, helpful, and scholarly—never evasive.
-- Do not fabricate diary contents that are not in the provided entries.`;
-
-      const contents = `Diary Status: ${diaryLocked ? 'SEALED (locked)' : 'UNSEALED (unlocked)'}\n\nUnlocked Diary Entries:\n${diaryContext}\n\nScroll Question: ${question.trim()}`;
 
       const ai = getGeminiClient();
       const response = await runWithModelFallback([
@@ -283,17 +459,9 @@ Rules:
               contents,
               config: {
                 systemInstruction,
+                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
                 tools: [{ googleSearch: {} }],
               },
-            }),
-        },
-        {
-          label: 'gemini-4-hydrogen (direct)',
-          run: () =>
-            ai.models.generateContent({
-              model: 'gemini-4-hydrogen',
-              contents,
-              config: { systemInstruction },
             }),
         },
         {
@@ -304,7 +472,20 @@ Rules:
               contents,
               config: {
                 systemInstruction,
+                thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
                 tools: [{ googleSearch: {} }],
+              },
+            }),
+        },
+        {
+          label: 'gemini-4-hydrogen (direct)',
+          run: () =>
+            ai.models.generateContent({
+              model: 'gemini-4-hydrogen',
+              contents,
+              config: {
+                systemInstruction,
+                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
               },
             }),
         },
@@ -314,43 +495,30 @@ Rules:
             ai.models.generateContent({
               model: 'gemini-3.1-flash-lite',
               contents,
-              config: { systemInstruction },
+              config: {
+                systemInstruction,
+                thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+              },
             }),
         },
       ]);
 
       const answer = (response.text ?? 'The ink faded before an answer formed. Please try again.').trim();
-      const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
-      const sources: Array<{ title: string; uri: string }> = [];
-      const seen = new Set<string>();
-      for (const chunk of chunks) {
-        const uri = chunk?.web?.uri;
-        const title = chunk?.web?.title;
-        if (uri && !seen.has(uri)) {
-          seen.add(uri);
-          sources.push({ title: title || uri, uri });
-        }
-      }
-
-      const mentionsEntry =
-        !diaryLocked &&
-        safeEntries.some(
-          (entry) =>
-            entry.title &&
-            answer.toLowerCase().includes(entry.title.toLowerCase())
-        );
-
-      let sourceType: 'diary' | 'web' | 'hybrid' = 'web';
-      if (mentionsEntry && sources.length > 0) {
-        sourceType = 'hybrid';
-      } else if (mentionsEntry || (!diaryLocked && safeEntries.length > 0 && sources.length === 0 && /diary|entry|journal|secret|wrote|note/i.test(question))) {
-        sourceType = 'diary';
-      }
+      const sources = extractGroundingSources(
+        response.candidates?.[0]?.groundingMetadata?.groundingChunks
+      );
+      const sourceType = resolveScrollSourceType(
+        trimmedQuestion,
+        answer,
+        diaryLocked,
+        safeEntries,
+        sources.length
+      );
 
       res.json({
         answer,
         sourceType,
-        sources: sources.slice(0, 5),
+        sources,
       });
     } catch (error) {
       console.error('Scroll oracle error:', error);
